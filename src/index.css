@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+/* Leaflet map base styling */
+.leaflet-container {
+  background-color: #0b0f19 !important;
+}
+
+/* Technical dark filter for free OpenStreetMap tile layer (100% key-free, no CARTO) */
+.leaflet-layer.dark-osm-tiles {
+  filter: brightness(0.6) invert(1) contrast(3) hue-rotate(200deg) saturate(0.3) brightness(0.7);
+}
+
