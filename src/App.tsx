@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Layers,
   ShieldCheck,
+  Server,
 } from 'lucide-react';
 import { NavigationTab } from './types';
 import { Sidebar } from './components/Sidebar';
@@ -36,22 +37,36 @@ export default function App() {
     refreshAll,
   } = useSupabaseData();
 
-  // Support direct URL path like /driver or #driver for phone convenience
+  // Support direct URL path and hash like /driver, #driver, /status, #status
   useEffect(() => {
-    const path = window.location.pathname;
-    const hash = window.location.hash;
-    if (path.includes('/driver') || hash.includes('driver')) {
-      setCurrentTab('driver');
-    }
+    const handleHash = () => {
+      const path = window.location.pathname;
+      const hash = window.location.hash;
+      if (path.includes('/driver') || hash.includes('driver')) {
+        setCurrentTab('driver');
+      } else if (path.includes('/status') || hash.includes('status')) {
+        setCurrentTab('status');
+      } else if (hash.includes('routes')) {
+        setCurrentTab('routes');
+      } else if (hash.includes('fleet')) {
+        setCurrentTab('fleet');
+      } else if (hash.includes('shipments')) {
+        setCurrentTab('shipments');
+      } else if (hash.includes('analytics')) {
+        setCurrentTab('analytics');
+      } else if (hash.includes('dashboard')) {
+        setCurrentTab('dashboard');
+      }
+    };
+
+    handleHash();
+    window.addEventListener('hashchange', handleHash);
+    return () => window.removeEventListener('hashchange', handleHash);
   }, []);
 
   const handleTabChange = (tab: NavigationTab) => {
     setCurrentTab(tab);
-    if (tab === 'driver') {
-      window.location.hash = 'driver';
-    } else if (window.location.hash === '#driver') {
-      window.location.hash = '';
-    }
+    window.location.hash = tab;
   };
 
   return (
@@ -116,12 +131,26 @@ export default function App() {
               onClick={() => handleTabChange('driver')}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
                 currentTab === 'driver'
-                  ? 'bg-emerald-500 text-slate-950'
+                  ? 'bg-emerald-500 text-slate-950 font-bold'
                   : 'bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800'
               }`}
             >
               <Smartphone className="w-3.5 h-3.5 text-emerald-400" />
               <span className="hidden sm:inline">Driver Portal</span>
+            </button>
+
+            {/* System Status & Connectivity Shortcut */}
+            <button
+              id="header-status-btn"
+              onClick={() => handleTabChange('status')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                currentTab === 'status'
+                  ? 'bg-emerald-500 text-slate-950 font-bold'
+                  : 'bg-slate-900 border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              <Server className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="hidden sm:inline">System Status</span>
             </button>
 
             {/* Refresh */}

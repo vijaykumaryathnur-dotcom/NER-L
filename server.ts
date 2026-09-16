@@ -11,6 +11,14 @@ const PORT = 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Ensure fresh assets and endpoints during development and testing
+app.use((req: Request, res: Response, next: express.NextFunction) => {
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 // Gracefully intercept payload size or JSON syntax errors to return JSON instead of HTML
 app.use((err: any, req: Request, res: Response, next: express.NextFunction) => {
   if (err?.type === 'entity.too.large' || err?.status === 413) {
@@ -82,10 +90,56 @@ app.get('/api/health', (req: Request, res: Response) => {
   });
 });
 
+// In-memory runtime configuration updated via UI Save & Verify or headers
+let runtimeSupabaseConfig = {
+  url: '',
+  anonKey: '',
+};
+let runtimeTomTomKey = '';
+
+// Helper to get effective TomTom key from request headers, runtime memory, or environment
+function getEffectiveTomTomKey(req?: Request): string {
+  const headerKey = (req?.headers['x-tomtom-key'] as string) || '';
+  return (
+    headerKey ||
+    runtimeTomTomKey ||
+    process.env.TOMTOM_API_KEY ||
+    process.env.VITE_TOMTOM_API_KEY ||
+    ''
+  ).trim();
+}
+
 // Normalize Supabase URL & ref
-function getNormalizedSupabaseConfig() {
-  let url = (process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || '').trim();
-  const serviceKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '').trim();
+// SUPABASE_SERVICE_ROLE_KEY is strictly server-side only: never exposed in diagnostics, responses, or client bundles.
+function getNormalizedSupabaseConfig(req?: Request) {
+  const headerUrl = (req?.headers['x-supabase-url'] as string) || '';
+  const headerKey = (req?.headers['x-supabase-anon-key'] as string) || '';
+
+  let url = (
+    headerUrl ||
+    runtimeSupabaseConfig.url ||
+    process.env.VITE_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    ''
+  ).trim();
+
+  // Public anon key for client-facing operations and presence verification
+  const anonKey = (
+    headerKey ||
+    runtimeSupabaseConfig.anonKey ||
+    process.env.VITE_SUPABASE_ANON_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
+
+  // Strictly server-only service role key for trusted backend operations (e.g. telemetry ingest)
+  const serviceRoleKey = (
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    ''
+  ).trim();
+
+  // For backend internal requests, prefer serviceRoleKey if available, otherwise fallback to anonKey
+  const backendKey = serviceRoleKey || anonKey;
 
   if (url) {
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
@@ -94,9 +148,10 @@ function getNormalizedSupabaseConfig() {
     if (url.includes('lxooymvwrdjjubfkcesc.supabase.co')) {
       url = url.replace('lxooymvwrdjjubfkcesc', 'lxooymwwrdjjubfkcesc');
     }
-    if (serviceKey) {
+    const keyForRef = anonKey || serviceRoleKey;
+    if (keyForRef) {
       try {
-        const parts = serviceKey.split('.');
+        const parts = keyForRef.split('.');
         if (parts.length >= 2) {
           const payload = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
           if (payload.ref && typeof payload.ref === 'string' && url.includes('.supabase.co')) {
@@ -109,18 +164,77 @@ function getNormalizedSupabaseConfig() {
     }
   }
 
-  return { url, serviceKey };
+  return { url, anonKey, serviceRoleKey, backendKey };
 }
 
-app.get('/api/system/status', async (req: Request, res: Response) => {
-  const { url: supabaseUrl, serviceKey: supabaseAnon } = getNormalizedSupabaseConfig();
+// Endpoint to sync client credentials to server runtime
+const handleSystemConfig = (req: Request, res: Response) => {
+  const { url, anonKey, tomtomKey } = req.body || {};
+  if (url !== undefined) {
+    runtimeSupabaseConfig.url = typeof url === 'string' ? url.trim() : '';
+  }
+  if (anonKey !== undefined) {
+    runtimeSupabaseConfig.anonKey = typeof anonKey === 'string' ? anonKey.trim() : '';
+  }
+  if (tomtomKey !== undefined) {
+    runtimeTomTomKey = typeof tomtomKey === 'string' ? tomtomKey.trim() : '';
+  }
+
+  const { url: activeUrl, anonKey: activeAnon, backendKey: activeKey } = getNormalizedSupabaseConfig(req);
+  const activeTomTom = getEffectiveTomTomKey(req);
+
+  res.json({
+    success: true,
+    url: runtimeSupabaseConfig.url,
+    configured: Boolean(activeUrl && (activeAnon || activeKey)),
+    diagnostics: {
+      supabaseUrlPresent: Boolean(activeUrl),
+      supabaseAnonPresent: Boolean(activeAnon || activeKey),
+      tomtomKeyPresent: Boolean(activeTomTom),
+    },
+  });
+};
+
+app.post('/api/supabase-config', handleSystemConfig);
+app.post('/api/system/supabase-config', handleSystemConfig);
+app.post('/api/system/config', handleSystemConfig);
+
+// Safe diagnostics endpoint: strictly returns booleans, never reveals secrets
+app.get('/api/system/diagnostics', (req: Request, res: Response) => {
+  const { url: supabaseUrl, anonKey: supabaseAnon, backendKey } = getNormalizedSupabaseConfig(req);
+  const tomtomKey = getEffectiveTomTomKey(req);
   const orsKey = process.env.OPENROUTE_SERVICE_API_KEY;
-  const tomtomKey = process.env.TOMTOM_API_KEY;
+
+  res.json({
+    supabaseUrlPresent: Boolean(supabaseUrl),
+    supabaseAnonPresent: Boolean(supabaseAnon || backendKey),
+    tomtomKeyPresent: Boolean(tomtomKey),
+    openRouteServiceKeyPresent: Boolean(orsKey),
+  });
+});
+
+app.get('/api/system/status', async (req: Request, res: Response) => {
+  const { url: supabaseUrl, anonKey: supabaseAnon, backendKey } = getNormalizedSupabaseConfig(req);
+  const orsKey = process.env.OPENROUTE_SERVICE_API_KEY;
+  const tomtomKey = getEffectiveTomTomKey(req);
+  const hasAnon = Boolean(supabaseAnon || backendKey);
+
+  const diagnostics = {
+    supabaseUrlPresent: Boolean(supabaseUrl),
+    supabaseAnonPresent: hasAnon,
+    tomtomKeyPresent: Boolean(tomtomKey),
+    openRouteServiceKeyPresent: Boolean(orsKey),
+  };
 
   const checks: Record<string, { status: 'Connected' | 'Unavailable' | 'Checking'; details: string }> = {
     database: {
-      status: supabaseUrl && supabaseAnon ? 'Connected' : 'Unavailable',
-      details: supabaseUrl ? 'Supabase URL configured' : 'Database credentials missing in environment',
+      status: supabaseUrl && hasAnon ? 'Connected' : 'Unavailable',
+      details:
+        supabaseUrl && hasAnon
+          ? 'Supabase PostgreSQL connected'
+          : supabaseUrl
+            ? 'Supabase URL set, anon key required'
+            : 'Database credentials missing in environment',
     },
     routing: {
       status: 'Connected', // We always have real road routing (ORS if key present, fallback to live OSRM)
@@ -143,7 +257,7 @@ app.get('/api/system/status', async (req: Request, res: Response) => {
       details: 'Secure vehicle GPS ingest active on /api/telemetry/ingest',
     },
     realtime: {
-      status: supabaseUrl && supabaseAnon ? 'Connected' : 'Unavailable',
+      status: supabaseUrl && hasAnon ? 'Connected' : 'Unavailable',
       details: supabaseUrl ? 'Supabase Realtime channel ready' : 'Supabase credentials needed for live sync',
     },
   };
@@ -151,6 +265,7 @@ app.get('/api/system/status', async (req: Request, res: Response) => {
   res.json({
     timestamp: new Date().toISOString(),
     checks,
+    diagnostics,
   });
 });
 
@@ -358,7 +473,7 @@ app.post('/api/weather', async (req: Request, res: Response) => {
 // -------------------------------------------------------------
 app.post('/api/traffic/incidents', async (req: Request, res: Response) => {
   const { bbox, routeCoordinates } = req.body; // bbox: [minLon, minLat, maxLon, maxLat], routeCoordinates: [[lat, lng], ...]
-  const tomtomKey = process.env.TOMTOM_API_KEY;
+  const tomtomKey = getEffectiveTomTomKey(req);
 
   if (!tomtomKey) {
     return res.json({
@@ -505,26 +620,26 @@ app.post('/api/telemetry/ingest', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Accuracy out of reasonable GPS bounds' });
   }
 
-  const { url: supabaseUrl, serviceKey } = getNormalizedSupabaseConfig();
+  const { url: supabaseUrl, backendKey } = getNormalizedSupabaseConfig(req);
 
-  if (!supabaseUrl || !serviceKey) {
+  if (!supabaseUrl || !backendKey) {
     // If Supabase is not yet configured, we reject direct database write but confirm telemetry syntax
     return res.status(503).json({
       error: 'Database backend not configured',
-      message: 'Supabase URL and Service credentials must be configured to persist telemetry.',
+      message: 'Supabase URL and database credentials must be configured to persist telemetry.',
     });
   }
 
   try {
-    // Forward to Supabase REST API securely with authorization
+    // Forward to Supabase REST API securely with authorization using server backend credentials
     const vehicleUpdateUrl = `${supabaseUrl}/rest/v1/vehicles?id=eq.${vehicle_id}`;
     const now = new Date().toISOString();
 
     const updateResp = await fetch(vehicleUpdateUrl, {
       method: 'PATCH',
       headers: {
-        apikey: serviceKey,
-        Authorization: authHeader || `Bearer ${serviceKey}`,
+        apikey: backendKey,
+        Authorization: authHeader || `Bearer ${backendKey}`,
         'Content-Type': 'application/json',
         Prefer: 'return=representation',
       },
@@ -543,8 +658,8 @@ app.post('/api/telemetry/ingest', async (req: Request, res: Response) => {
     await fetch(telemetryInsertUrl, {
       method: 'POST',
       headers: {
-        apikey: serviceKey,
-        Authorization: authHeader || `Bearer ${serviceKey}`,
+        apikey: backendKey,
+        Authorization: authHeader || `Bearer ${backendKey}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({

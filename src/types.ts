@@ -119,6 +119,13 @@ export interface SystemStatusCheck {
   details: string;
 }
 
+export interface SystemDiagnostics {
+  supabaseUrlPresent: boolean;
+  supabaseAnonPresent: boolean;
+  tomtomKeyPresent: boolean;
+  openRouteServiceKeyPresent?: boolean;
+}
+
 export interface SystemStatusResponse {
   timestamp: string;
   checks: {
@@ -130,6 +137,7 @@ export interface SystemStatusResponse {
     telemetry_api: SystemStatusCheck;
     realtime: SystemStatusCheck;
   };
+  diagnostics?: SystemDiagnostics;
 }
 
 export type UserRole = 'admin' | 'dispatcher' | 'driver';
